@@ -465,6 +465,42 @@
   }
 
   /**
+   * Find ALL executable orders for batch execution
+   * Returns orders sorted by lowest target price first
+   */
+  function findExecutableOrders(currentPrice) {
+    return settings.orders
+      .filter(o => o.status === 'pending' && currentPrice <= o.targetPrice)
+      .sort((a, b) => a.targetPrice - b.targetPrice);
+  }
+
+  /**
+   * Validate batch execution against budget constraints
+   * Returns orders that fit within remaining budget (lowest target first)
+   */
+  function validateBatchExecution(orders, maxBudget, totalSpent) {
+    const remainingBudget = maxBudget - totalSpent;
+
+    // Check if all orders fit within budget
+    const batchTotal = orders.reduce((sum, o) => sum + o.amount, 0);
+    if (batchTotal <= remainingBudget) {
+      return { orders, totalAmount: batchTotal };
+    }
+
+    // Partial execution: select orders that fit within budget (lowest target first)
+    let selectedOrders = [];
+    let runningTotal = 0;
+    for (const order of orders) {
+      if (runningTotal + order.amount <= remainingBudget) {
+        selectedOrders.push(order);
+        runningTotal += order.amount;
+      }
+    }
+
+    return { orders: selectedOrders, totalAmount: runningTotal };
+  }
+
+  /**
    * Find the latest IN PROGRESS order from vault's "Your Orders" section
    * @returns {Object|null} { orderId, detailsUrl } or null if not found
    */
@@ -648,6 +684,91 @@
     }
   }
 
+  /**
+   * Execute multiple orders as a single combined transaction
+   * @param {Array} orders - Array of orders to execute
+   * @param {number} executionPrice - Current market price
+   */
+  async function executeBatchBuyProcess(orders, executionPrice) {
+    if (!STATE.isRunning) {
+      log('Script not running, cancelling batch buy process');
+      return;
+    }
+
+    if (STATE.buyProcessStarted) {
+      log('Buy process already in progress');
+      return;
+    }
+
+    const combinedAmount = orders.reduce((sum, o) => sum + o.amount, 0);
+    const orderIds = orders.map(o => o.id);
+    const targets = orders.map(o => `$${o.targetPrice.toFixed(2)}`).join(', ');
+
+    log(`Starting batch buy: ${orders.length} order(s), $${combinedAmount} total`);
+    log(`Order targets (lowest first): ${targets}`);
+
+    STATE.buyProcessStarted = true;
+    STATE.currentStep = 1;
+    STATE.currentOrderIndex = orderIds;
+    await persistState();
+    updateStatus('Buying...');
+
+    try {
+      // Step 1: Enter combined amount
+      if (!await executeStep1(combinedAmount)) {
+        throw new Error('Step 1 failed');
+      }
+      STATE.currentStep = 2;
+      await persistState();
+
+      // Wait 5s before step 2
+      log('Waiting 5s before step 2...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
+      // Step 2: Click Buy XCH
+      if (!await executeStep2()) {
+        throw new Error('Step 2 failed');
+      }
+      STATE.currentStep = 3;
+      await persistState();
+
+      // Wait 5s before step 3
+      log('Waiting 5s before step 3...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
+      // Step 3: Confirm purchase
+      if (!await executeStep3()) {
+        throw new Error('Step 3 failed');
+      }
+
+      // Mark ALL orders as executed
+      for (const order of orders) {
+        await markOrderExecuted(order.id, executionPrice);
+      }
+
+      STATE.ordersExecuted += orders.length;
+      STATE.totalSpent += combinedAmount;
+      await persistState();
+
+      const xchReceived = (combinedAmount / executionPrice).toFixed(4);
+      log(`Batch complete! ${orders.length} order(s) filled at $${executionPrice.toFixed(2)}`);
+      log(`Total: $${combinedAmount} → ${xchReceived} XCH. Spent so far: $${STATE.totalSpent}`);
+      updateStats();
+      updateBadge();
+
+    } catch (error) {
+      log(`Batch buy process error: ${error.message}`, 'error');
+    } finally {
+      STATE.buyProcessStarted = false;
+      STATE.currentStep = 0;
+      STATE.currentOrderIndex = null;
+      await persistState();
+      updateStatus(STATE.isRunning ? 'Running' : 'Stopped');
+
+      scheduleRefresh();
+    }
+  }
+
   // ============================================
   // PRICE CHECK & REFRESH LOGIC
   // ============================================
@@ -687,17 +808,24 @@
       return;
     }
 
-    const nextPendingAmount = pendingOrders[0].amount;
-    if (STATE.totalSpent + nextPendingAmount > settings.maxBudget) {
-      log('Max budget would be exceeded, stopping');
-      await stopMonitoring();
-      return;
-    }
+    // Find all orders that can be executed at current price
+    const executableOrders = findExecutableOrders(currentPrice);
 
-    const executableOrder = findExecutableOrder(currentPrice);
-    if (executableOrder) {
-      log(`Price $${currentPrice.toFixed(2)} <= target $${executableOrder.targetPrice.toFixed(2)}! Executing order...`);
-      executeBuyProcess(executableOrder, currentPrice);
+    if (executableOrders.length > 0) {
+      // Validate batch against budget constraints
+      const batch = validateBatchExecution(executableOrders, settings.maxBudget, STATE.totalSpent);
+
+      if (batch.orders.length > 0) {
+        const targets = batch.orders.map(o => `$${o.targetPrice.toFixed(2)}`).join(', ');
+        log(`Price $${currentPrice.toFixed(2)} triggers ${batch.orders.length} order(s) [${targets}]`);
+        log(`Combined amount: $${batch.totalAmount}`);
+
+        // Use batch execution for combined transaction
+        executeBatchBuyProcess(batch.orders, currentPrice);
+      } else {
+        log('All executable orders would exceed budget, stopping');
+        await stopMonitoring();
+      }
     } else {
       const lowestTarget = Math.min(...pendingOrders.map(o => o.targetPrice));
       log(`Price above all targets. Lowest target: $${lowestTarget.toFixed(2)}`);

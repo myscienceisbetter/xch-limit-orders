@@ -7,6 +7,7 @@ This extension runs entirely in your browser and automates the purchase flow by 
 ## Features
 
 - **Limit Orders**: Set target prices and amounts for automatic execution
+- **Batch Execution**: When price drops below multiple order targets, all qualifying orders execute in a single combined transaction for faster execution and maximum XCH
 - **Max Budget**: Define a spending cap to control your total exposure
 - **Auto-Refresh**: Configurable page refresh interval to check prices
 - **Persistent State**: Orders and settings survive browser restarts
@@ -51,6 +52,23 @@ The extension uses MutationObserver to detect UI state changes:
 1. **Step 1 (Details)**: Waits for Next button to become enabled after entering amount
 2. **Step 2 (Payment)**: Waits for Buy XCH button to become enabled
 3. **Step 3 (Confirmation)**: Waits for dialog, clicks checkboxes, waits for Next to enable
+
+### Batch Order Execution
+
+When the price drops below multiple order targets simultaneously, the extension combines them into a single transaction:
+
+**Example**: Orders at $3.20, $3.10, and $3.00 (each $100). Price drops to $2.90.
+
+| Without Batch | With Batch |
+|---------------|------------|
+| Execute $100 @ $2.90, wait for refresh | Execute $300 @ $2.90 in one transaction |
+| Execute $100 @ $2.90, wait for refresh | All 3 orders filled immediately |
+| Execute $100 @ $2.90 | |
+| ~15 min total | ~5 min total |
+
+**Order Priority**: Orders are executed lowest target price first ($3.00 → $3.10 → $3.20).
+
+**Partial Execution**: If the combined amount would exceed your max budget, the extension executes as many orders as fit within your remaining budget.
 
 ### Refresh Scheduling
 
