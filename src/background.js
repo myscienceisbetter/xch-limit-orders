@@ -28,14 +28,28 @@ browserAPI.alarms.onAlarm.addListener(async (alarm) => {
     });
 
     if (tabs.length > 0) {
-      const tabUrl = tabs[0].url;
-      console.log('[Background] Closing and reopening tab:', tabs[0].id);
+      let tid = tabs[0].id;
+      if(tid == browserAPI.tabs.TAB_ID_NONE) {
+        console.log('[Background] Could not get tab ID, skipping refresh');
+        return;
+      }
 
-      // Close existing tab
-      await browserAPI.tabs.remove(tabs[0].id);
+      const binfo = await browserAPI.runtime.getBrowserInfo();
+      if(binfo.vendor == 'Mozilla') {
+          console.log('[Background] Reloading tab:', tabs[0].id);
 
-      // Open new tab with same URL (in background)
-      await browserAPI.tabs.create({ url: tabUrl, active: false });
+          // Reload tab.
+          await browserAPI.tabs.reload(tabs[0].id);
+      } else {
+        const tabUrl = tabs[0].url;
+        console.log('[Background] Closing and reopening tab:', tabs[0].id);
+
+        // Close existing tab
+        await browserAPI.tabs.remove(tabs[0].id);
+
+        // Open new tab with same URL (in background)
+        await browserAPI.tabs.create({ url: tabUrl, active: false });
+      }
     } else {
       console.log('[Background] No vault.chia.net tab found');
     }
