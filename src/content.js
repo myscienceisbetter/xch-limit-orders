@@ -67,7 +67,8 @@
     amountInput: 'input.is_Input[inputmode="decimal"]',
     dialog: 'dialog.is_DialogContent[data-state="open"]',
     checkboxUnchecked: 'button#confirmation-checkbox[data-state="unchecked"]',
-    checkbox: 'button#confirmation-checkbox'
+    checkbox: 'button#confirmation-checkbox',
+    errorMessage: 'span._col-red10'  // Red error text for limit messages
   };
 
   // ============================================
@@ -237,6 +238,24 @@
   }
 
   /**
+   * Check for daily limit error messages
+   * Returns: 'SYSTEM_DAILY_LIMIT' | 'USER_DAILY_LIMIT' | null
+   */
+  function checkForDailyLimitError() {
+    const errorSpans = document.querySelectorAll(SELECTORS.errorMessage);
+    for (const span of errorSpans) {
+      const text = span.textContent.trim().toLowerCase();
+      if (text.includes('exceeds system daily limit')) {
+        return 'SYSTEM_DAILY_LIMIT';  // Retry on refresh
+      }
+      if (text.includes('exceeds your daily limit')) {
+        return 'USER_DAILY_LIMIT';    // Stop monitoring
+      }
+    }
+    return null;
+  }
+
+  /**
    * Wait for an element to appear in the DOM
    */
   function waitForElement(selector, timeout = 10000) {
@@ -268,8 +287,9 @@
 
   /**
    * Wait for a button with specific text to appear AND become enabled
+   * @param {boolean} checkDailyLimit - If true, also check for daily limit errors
    */
-  function waitForEnabledButton(buttonText, containerSelector = 'body', timeout = 10000) {
+  function waitForEnabledButton(buttonText, containerSelector = 'body', timeout = 10000, checkDailyLimit = false) {
     return new Promise((resolve, reject) => {
       const findEnabledButton = () => {
         const container = document.querySelector(containerSelector) || document.body;
@@ -282,6 +302,14 @@
         return null;
       };
 
+      // Check for daily limit error immediately
+      if (checkDailyLimit) {
+        const limitError = checkForDailyLimitError();
+        if (limitError) {
+          return reject(new Error(limitError));
+        }
+      }
+
       const btn = findEnabledButton();
       if (btn) {
         log(`Button "${buttonText}" found and enabled immediately`);
@@ -290,6 +318,16 @@
 
       log(`Waiting for enabled button: "${buttonText}"`);
       const observer = new MutationObserver(() => {
+        // Check for daily limit error on each mutation
+        if (checkDailyLimit) {
+          const limitError = checkForDailyLimitError();
+          if (limitError) {
+            observer.disconnect();
+            reject(new Error(limitError));
+            return;
+          }
+        }
+
         const btn = findEnabledButton();
         if (btn) {
           observer.disconnect();
@@ -573,7 +611,8 @@
     amountInput.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
 
     log('Step 1: Waiting for Next button to enable...');
-    const nextButton = await waitForEnabledButton('Next');
+    // Pass checkDailyLimit=true to detect daily limit errors immediately
+    const nextButton = await waitForEnabledButton('Next', 'body', 10000, true);
 
     log('Step 1: Next button enabled, clicking...');
     nextButton.click();
@@ -672,7 +711,18 @@
       updateBadge();
 
     } catch (error) {
-      log(`Buy process error: ${error.message}`, 'error');
+      if (error.message === 'SYSTEM_DAILY_LIMIT') {
+        log('System daily limit reached - will retry on next refresh', 'warn');
+        // Don't stop monitoring - system limit may be raised later
+        // Let finally block run normally to schedule refresh
+      } else if (error.message === 'USER_DAILY_LIMIT') {
+        log('Your daily limit reached - stopping monitoring', 'error');
+        updateStatus('Daily Limit Reached');
+        await stopMonitoring();
+        return; // Exit before finally block schedules refresh
+      } else {
+        log(`Buy process error: ${error.message}`, 'error');
+      }
     } finally {
       STATE.buyProcessStarted = false;
       STATE.currentStep = 0;
@@ -757,7 +807,18 @@
       updateBadge();
 
     } catch (error) {
-      log(`Batch buy process error: ${error.message}`, 'error');
+      if (error.message === 'SYSTEM_DAILY_LIMIT') {
+        log('System daily limit reached - will retry on next refresh', 'warn');
+        // Don't stop monitoring - system limit may be raised later
+        // Let finally block run normally to schedule refresh
+      } else if (error.message === 'USER_DAILY_LIMIT') {
+        log('Your daily limit reached - stopping monitoring', 'error');
+        updateStatus('Daily Limit Reached');
+        await stopMonitoring();
+        return; // Exit before finally block schedules refresh
+      } else {
+        log(`Batch buy process error: ${error.message}`, 'error');
+      }
     } finally {
       STATE.buyProcessStarted = false;
       STATE.currentStep = 0;
